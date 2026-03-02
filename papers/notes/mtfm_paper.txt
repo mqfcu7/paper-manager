@@ -1,0 +1,943 @@
+MTFM: A Scalable and Alignment-free Foundation Model for
+Industrial Recommendation in Meituan
+Xin Song∗, Zhilin Guan∗, Ruidong Han∗†, Binghao Tang, Tianwen Chen, Bing Li, Zihao Li, Han
+Zhang, Fei Jiang†, Qing Wang, Zikang Xu, Fengyi Li, Chunzhen Jing, Lei Yu, Wei Lin
+{songxin21, guanzhilin02, hanruidong, tangbinghao, chentianwen04, libing65, lizihao30, zhanghan56, jiangfei05,
+wangqing24, xuzikang02, lifengyi06, jingchunzhen, yulei37, linwei31}@meituan.com
+Meituan
+Beijing, China
+Abstract
+Industrial recommendation systems typically involve multiple sce-
+narios, yet existing cross-domain (CDR) and multi-scenario (MSR)
+methods often require prohibitive resources and strict input align-
+ment, limiting their extensibility. We propose MTFM (Meituan
+FoundationModel for Recommendation), a transformer-based frame-
+work that addresses these challenges. Instead of pre-aligning inputs,
+MTFM transforms cross-domain data into heterogeneous tokens,
+capturing multi-scenario knowledge in an alignment-free manner.
+To enhance efficiency, we first introduce a multi-scenario user-level
+sample aggregation that significantly enhances training throughput
+by reducing the total number of instances. We further integrate
+Grouped-Query Attention and a customized Hybrid Target Atten-
+tion to minimize memory usage and computational complexity.
+Furthermore, we implement various system-level optimizations,
+such as kernel fusion and the elimination of CPU-GPU blocking,
+to further enhance both training and inference throughput. Offline
+and online experiments validate the effectiveness of MTFM, demon-
+strating that significant performance gains are achieved by scaling
+both model capacity and multi-scenario training data.
+CCS Concepts
+•Information systems→Recommender systems.
+Keywords
+Recommender System; Ranking Model; Foundation Model
+ACM Reference Format:
+Xin Song∗, Zhilin Guan∗, Ruidong Han∗†, Binghao Tang, Tianwen Chen,
+Bing Li, Zihao Li, Han Zhang, Fei Jiang†, Qing Wang, Zikang Xu, Fengyi Li,
+Chunzhen Jing, Lei Yu, Wei Lin. 2018. MTFM: A Scalable and Alignment-free
+Foundation Model for Industrial Recommendation in Meituan. InProceedings
+of Make sure to enter the correct conference title from your rights confirmation
+email (Conference acronym ’XX).ACM, New York, NY, USA, 9 pages. https:
+//doi.org/XXXXXXX.XXXXXXX
+* These authors contributed equally to this work.
+†Corresponding author.
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+Conference acronym ’XX, Woodstock, NY
+©2018 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM ISBN 978-1-4503-XXXX-X/2018/06
+https://doi.org/XXXXXXX.XXXXXXX1 Introduction
+The landscape of Large Language Models (LLM) has been redefined
+by the era of Foundation Models (FMs), where unified architectures
+have evolved from unimodal to multimodal [ 2,7,13,22,27]. In
+parallel, the recommendation community has begun to validate
+the Scaling Laws [ 10,11], primarily focusing on the expansion
+of model parameters and data volume within isolated scenarios
+[8,25,30,31,35,37]. However, the true potential of a Recommenda-
+tion Foundation Model remains untapped as long as models are con-
+fined to single-scenario silos. Inspired by the success of multimodal
+FMs, we argue that the next frontier lies in bridging cross-scenario
+heterogeneity. By extending from single-scene optimization to a
+unified multi-scenario framework, we can leverage diverse behav-
+ioral signals to further unlock the benefits of Scaling Laws, thereby
+elevating the performance upper bound and establishing a more
+scalable paradigm for recommendation.
+To realize this vision, we contend that an ideal Recommendation
+Foundation Model must embody three quintessential properties:
+Scalability, Extensibility, and Efficiency. First, Scalability requires
+the model to yield consistent and predictable performance gains as
+the parameter size and data volume expand. Second, Extensibility
+dictates that the model can seamlessly adapt to an arbitrary number
+of existing scenarios or integrate emerging ones with low cost.
+Finally, Efficiency; the framework must maintain low computational
+overhead during both training and inference, even when handling
+the massive data volumes generated across diverse scenarios.
+Existing multi-scenario modeling efforts [ 18,20,26,33] primarily
+follow a "harmonize-then-decompose" paradigm. These approaches
+typically aggregate data from multiple scenarios and enforce input
+homogeneity with a fixed template. Any heterogeneous compo-
+nents must be either discarded or handled through an additional
+padding operator. Structurally, they rely on disentangling model
+parameters into domain-invariant and domain-specific components
+(e.g., via MoE-based architectures [ 6,14]) to capture shared knowl-
+edge while preserving scenario-specific nuances.
+However, these conventional paradigms fall short of the afore-
+mentioned hallmarks for a foundation model. 1) Rigidity in Ex-
+tensibility: Industrial recommendations often encompass highly
+divergent scenarios with heterogeneous feature spaces. For instance,
+in our food delivery platform, the feature schemas for restaurant
+recommendation and food recommendations are inherently dis-
+tinct due to different types of supply and UI presentations. The
+reliance on strict feature alignment is unsustainable in industrial
+ecosystems. Forcing hundreds of heterogeneous features into a
+fixed template is not only error-prone but also leads to significantarXiv:2602.11235v2  [cs.IR]  13 Feb 2026
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY MTFM Team
+information loss. 2) Lack of Architectural Scalability: Most existing
+structures are handcrafted based on expert heuristics to handle a
+fixed set of scenarios. Such intricate, scenario-tailored designs lack
+the structural flexibility needed to benefit from the scaling laws
+observed in other scenarios. 3) Prohibitive Computational Costs:
+Within the traditional paradigm, training costs increase linearly
+with data volume. The brute-force integration of massive multi-
+scenario data leads to exorbitant expenses, rendering the model
+economically inefficient for real-world deployment.
+To address these challenges, we present the Meituan Founda-
+tion Model (MTFM), a unified framework engineered to satisfy the
+three quintessential properties. First, to ensure Extensibility, MTFM
+moves beyond rigid feature templates by abstracting multi-domain
+inputs into a unified sequence of heterogeneous tokens. This token-
+based representation allows the model to ingest disparate signals
+across scenarios without manual alignment or information loss.
+Building upon this, we employ a transformer-inspired backbone
+designed for Scalability. By replacing handcrafted heuristic-based
+structures with a deep self-attention mechanism, MTFM empowers
+the model to automatically capture both universal behavioral laws
+and scenario-specific nuances as the model and data scale.
+To achieve superior Efficiency without compromising modeling
+capacity, we introduce Hybrid Target Attention (HTA). While full-
+attention backbones excel in expressiveness, their quadratic com-
+plexity is prohibitive for industrial-scale long sequences. Inspired by
+the application of sparse attention in LLMs [ 16,21,29], HTA serves
+as a strategic middle ground: it selectively applies full attention to
+a few critical layers to maintain global dependency capture, while
+utilizing target attention for the majority of the stack. By further
+integrating Grouped-Query Attention (GQA) [ 1], MTFM signifi-
+cantly compresses the memory footprint and improves the training
+throughput, enabling the processing of more multi-scenario tokens
+with minimal overhead.
+Beyond architectural innovations, we implement a suite of sys-
+tematic optimizations to bridge the gap between theoretical models
+and real-world deployment. On the data front, we utilize user-level
+aggregation from multiple scenarios to transform fragmented sam-
+ples into dense sequences, substantially boosting training through-
+put. At the system level, we nearly double both training and in-
+ference throughput by eliminating critical bottlenecks through a
+range of techniques, such as CPU-GPU pipeline orchestration, ker-
+nel fusion, and structured sparsity. These co-designs ensure that
+MTFM is economically viable for large-scale production.
+We evaluate the performance of MTFM through both offline
+experiments and online A/B testing across various scenarios in
+Meituan. Offline experiments demonstrate that MTFM consistently
+outperforms state-of-the-art baselines across multiple scenarios
+and objectives. Specifically, for the CTR (Click-Through Rate) task,
+MTFM achieves an average GAUC (Grouped Area Under the Curve)
+improvement of 0.36pp (percentage points), with a maximum gain
+of 0.76pp. For CTCVR (Click-Through Conversion Rate) tasks, the
+model yields an average GAUC increase of 0.29pp and a peak im-
+provement of 0.53pp. Furthermore, Real-world online A/B testing
+shows significant business growth: a +2.98% increase in orders for
+the Shenqiangshou (SQS) Coupon-Package Recommendation, and
+a +1.45% boost for the Pinhaofan (PHF) Food Recommendation.
+Our main contributions are summarized as follows:•Unified Foundation Architecture: We propose MTFM, a multi-
+scenario foundation model that uses heterogeneous tokeniza-
+tion to ensure seamless extensibility and scalability across
+disparate domains.
+•Hybrid Target Attention: We introduce HTA, a novel atten-
+tion mechanism combining sparse-dense layers and GQA to
+achieve an optimal trade-off between modeling capacity and
+computational efficiency.
+•System-Model Co-design: We implement system-level op-
+timizations to ensure the economic viability of MTFM in
+industrial-scale production.
+•Empirical Validation: Extensive offline and online evalu-
+ations at Meituan demonstrate significant gains, proving
+MTFM’s real-world effectiveness.
+2 Related Work
+2.1 Multi-Scenario Recommendation
+Existing research primarily follows a "harmonize-then-decompose"
+paradigm, which aims to balance commonality and diversity by
+disentangling model parameters into domain-invariant and domain-
+specific components. For instance, STAR [ 18] pioneered this ap-
+proach with a star topology that anchors domain-specific parame-
+ters around shared centered weights. To further capture complex
+feature interactions, M3OE [ 33] leverages three specialized MoE
+modules to learn hierarchical user preferences across common, do-
+main, and task aspects. More recently, MLoRA [ 28] introduces a
+more parameter-efficient alternative by adapting LoRA modules
+for individual domains.
+Moving beyond parameter-level disentanglement, recent studies
+have increasingly explored multi-scenario foundation models to
+achieve superior generalization. This line of work often adopts a
+"Foundation-Expert" architecture. For example, ExFM [ 17] distills
+knowledge from ultra-large-scale models into scenario-specific ex-
+perts, while LFM4Ads [ 32] utilizes multi-granularity mechanisms
+to transfer comprehensive representations across features and tasks.
+Similarly, [ 12] incorporates HSTU as a robust encoder to bridge
+foundational target information with downstream expert models.
+However, these approaches predominantly rely on a two-stage
+pipeline rather than a fully end-to-end foundation model, which
+potentially limits the model’s performance upper bound.
+2.2 Ranking Model with Scalability
+Current methods are primarily categorized into two paradigms:
+Transformer-based and non-Transformer-based (often referred to
+as Deep Learning Recommendation Models, DLRM). Transformer-
+based approaches partition input features into individual tokens
+and leverage Transformer-like architectures for unified modeling.
+Specifically, HSTU [ 30] reconceptualizes recommendation as a se-
+quential transduction task, employing a high-performance archi-
+tecture to capture user behavior patterns. To further enrich feature
+interactions, MTGR [ 9] extends this by incorporating cross-features
+and bidirectional attention mechanisms. Recognizing the computa-
+tional demands of such models, OneTrans [ 34] addresses inference
+efficiency via a pyramid-style tail truncation strategy. More recently,
+scaling laws have been explored within generative frameworks
+[5,36], and these efforts also remain rooted in the Transformer
+MTFM: A Scalable and Alignment-free Foundation Model for Industrial Recommendation in Meituan Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+backbone. Conversely, traditional DLRM adopts a modular design,
+decomposing the system into distinct functional components. These
+methods achieve scalability by selectively expanding specific stack-
+able modules. For instance, RankMixer [ 37] enhances the classic
+DLRM architecture by integrating Per-token Feed-Forward Net-
+works to boost model capacity. Similarly, WuKong [ 31] attains
+scalability through a specialized design of stacked layers, combin-
+ing Factorization Machine blocks with Linear Compress blocks to
+effectively increase model scalability.
+3 Methodology
+In this section, we first introduce the multi-scenario data arrange-
+ment method in Section 3.1. Next, we elaborate on the MTFM
+model architecture in Section 3.2, including the heterogeneous to-
+kenization module and hybrid attention architecture. Finally, we
+discuss optimization techniques during training and deployment
+in Section 3.3, which are critical for successfully applying MTFM
+to industrial-scale multi-scenario recommendation systems.
+3.1 User Sample Aggregation with
+Multi-Scenario Data
+In this subsection, we extend the data arrangement method from
+MTGR [ 9] for multi-scenario modeling. Following MTGR, we aggre-
+gate samples at the user level during training and at the request level
+during inference. The difference is that in MTFM, the aggregated
+samples contain candidates and features from multiple scenarios.
+For offline training, we aggregate all exposure behaviors in a
+specific time window from multiple scenarios at the user-level.
+Specifically, each user 𝑢corresponds to multiple training samples,
+denoted by D𝑢=(𝑋𝑢,𝑌𝑢), where𝑋𝑢and𝑌𝑢are the sets of input
+features and labels, respectively. In the following, we omit the
+subscript𝑢for brevity when there is no ambiguity. In more detail,
+the input feature set and the label set with user-level aggregation
+are denoted as follows:
+𝑋=[{𝐻𝑖}𝑁𝐻
+𝑖=1,{𝑅𝑖}𝑁𝑅
+𝑖=1,{𝑈𝑠}𝑁𝑆
+𝑠=1,{{𝐶𝑠
+𝑖,𝐼𝑠
+𝑖}𝑁𝑠
+𝐸
+𝑖=1}𝑁𝑆
+𝑠=1](1)
+𝑌={{𝑌𝑠
+𝑖}𝑁𝑠
+𝐸
+𝑖=1}𝑁𝑆
+𝑠=1,𝐻𝑖={ℎ𝑖𝑗}𝑁𝑖
+𝐻
+𝑗=1,𝑅𝑖={𝑟𝑖𝑗}𝑁𝑖
+𝑅
+𝑗=1(2)
+where𝐶𝑠
+𝑖,𝐼𝑠
+𝑖, and𝑌𝑠
+𝑖are the sets of cross features, item-side features,
+and labels of the 𝑖-th exposure in scenario 𝑠.𝑁𝑠
+𝐸is the number of
+exposures in scenario 𝑠, and𝑁𝑆is the number of scenarios. 𝑈𝑠is the
+set of scenario-specific user features in scenario 𝑠,{𝐻𝑖}is the set of
+historical interaction sequences, and {𝑅𝑖}records the user’s most
+recent behaviors. Each ℎ𝑖𝑗or𝑟𝑖𝑗represents an action, including
+multiple features such as item ID, item tag, etc., and 𝑁𝑖
+𝐻,𝑁𝑖
+𝑅is the
+sequence length. Since the timing of behaviors in 𝑅𝑖may overlap
+with the sample aggregation window, some actions 𝑟𝑖𝑗might occur
+after the exposure represented by 𝐶𝑠
+𝑖and𝐼𝑠
+𝑖. Modeling these directly
+introduces the risk of information leakage. Following the approach
+in MTGR, we will address this by constructing a dynamic mask
+based on interaction timestamps in the next section.
+Notably, as user behavior sequences across diverse scenarios
+constitute integral parts of their overall interests, both historical
+and real-time sequences ( 𝐻and𝑅) are shared across all scenarios.
+In contrast, for scenario-specific features—including user attributes
+𝑈, cross-features 𝐶, and item-side characteristics 𝐼are treated asscenario-specific. This configuration is dictated by the fundamental
+structural divergence between domains; for instance, the restau-
+rant recommendation scenario naturally lacks specific food tags,
+rendering the feature schemas across these scenarios intrinsically
+incompatible for direct alignment.
+For online inference, each scenario deploys its corresponding
+subgraph in MTFM and aggregates the features of all candidates
+at the request level. Our subgraph restricts computation to compo-
+nents relevant to the current scenario, bypassing scenario-specific
+modules belonging to other scenarios. Specically, the input feature
+for scenario 𝑠is denoted by 𝑋𝑠=[𝑈𝑠,{𝐻𝑖}𝑁𝐻
+𝑖=1,{𝑅𝑖}𝑁𝑅
+𝑖=1,{𝐶𝑠
+𝑖,𝐼𝑠
+𝑖}𝑁𝑠
+𝐶
+𝑖=1],
+where𝑁𝑠
+𝐶is the number of candidates in one request of scenario 𝑠.
+3.2 MTFM Model Architecture
+In this subsection, we introduce the model architecture of MTFM
+as shown in Figure 1.
+3.2.1 Heterogeneous Tokenization.We first detail how our model
+represents the input features as a variable-length sequence of het-
+erogeneous tokens.
+There are three primary types of tokens in our model, including
+H-token, R-token, and T-token. Taking {𝐻𝑖}as an example, each
+itemℎ𝑖𝑗in{𝐻𝑖}corresponds to an H-token, whose embedding is
+generated by first embedding raw item features and subsequently
+applying an MLP to project them into a unified dimension𝑑 model :
+h𝑖𝑗=MLP𝑖(Emb(ℎ𝑖𝑗))(3)
+Different MLP𝑖are employed as tokenizers for the H-tokens corre-
+sponding to different historical sequences, due to the heterogeneity
+of features contained within these sequences.
+After that, we sort the token embeddings of items in all histor-
+ical sequences in chronological order to form a new embedding
+matrixH∈R𝐿𝐻×𝑑model, where𝐿𝐻is the total number of items in all
+historical sequences.
+Similarly, the real-time sequences are tokenized into an embed-
+ding matrixR∈R𝐿𝑅×𝑑model, where𝐿𝑅is the total number of items
+in all real-time sequences.
+Each exposure behavior corresponds to a T-token, whose input
+features are the concatenation of the user profile, cross and tar-
+get item features. Specically, the token embedding of an exposure
+behavior on a target item is obtained as follows:
+t𝑠
+𝑖=MLP𝑠(Emb(𝑈𝑠)∥Emb(𝐶𝑠
+𝑖)∥Emb(𝐼𝑠
+𝑖))(4)
+where∥means column concatenation. All the exposure behaviors
+are tokenized into an embedding matrixT ∈R𝐿𝑇×𝑑model, where𝐿𝑇
+is the total number of exposures in all scenarios.
+Finally, all the H-, R-, and T-tokens are stacked to form the initial
+input embedding matrix to our Hybrid Attention Architecture:
+X(0)=(H;R;T)∈R𝑁×𝑑 model (5)
+where(;)means row concatenation and 𝑁=𝐿𝐻+𝐿𝑅+𝐿𝑇is the
+total number of tokens which can vary for different users.
+3.2.2 Hybrid Target Attention Architecture.While Transformers
+are natural candidates for modeling the resulting heterogeneous
+token sequences, their 𝑂(𝑛2)complexity poses significant computa-
+tional challenges in multi-scenario settings where sequence lengths
+increase substantially. To balance modeling efficacy and efficiency,
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY MTFM Team
+Hybrid Attention Architecture
+Grouped-Query Attention
+K V Q UA
+GLN
+Add & GLNK V Q UGrouped-Query AttentionA
+Add & GLNCopyGLN
+x Bx 1x KTarget Attention Layer
+Full Attention Layer
+Embedding LookupTokenizerMerge & Sort
+Tokenizer Tokenizer Tokenizer Tokenizer Tokenizer
+Scenario-1 User &
+Context & Item FeaturesScenario-2 User &
+Context & Item FeaturesRSeq2 Item ID &
+Side Infos\ \ \ \Scenario-1
+Multi-task TowerScenario-2
+Multi-task Tower
+RSeq1 Item ID &
+Side InfosHSeq2 Item ID &
+Side InfosHSeq1 Item ID &
+Side InfosH-Tokens R-TokensScenario-1
+T-TokensScenario-2
+T-Tokens
+Merge & Sort
+H- & R-T okens T-Tokens
+Figure 1: The Model Architecture of MTFM
+we propose a Hybrid Target Attention architecture. Specifically,
+our model consists of 𝐵stacked blocks; to mitigate the quadratic
+bottleneck, each block interleaves one full attention layer with 𝐾
+efficient Target Attention layers. This hybrid design allows the
+model to capture global dependencies while significantly reducing
+the computational overhead compared to standard Transformers.
+We first introduce the Full Attention Layer and the Target At-
+tention Layer, respectively. In the Full Attention Layers, we first
+apply group layer normalization to the input tokens: H-tokens from
+different historical sequences are assigned to different groups; sim-
+ilarly, R-tokens from different real-time sequences are assigned to
+different groups; and T-tokens from different scenarios also belong
+to distinct groups. This design enables the model to better adapt
+to the diverse distributions arising from different sequences and
+token features:
+eX(𝑙)=GLN(X(𝑙))(6)
+Finally, the normalized token embeddings are fed into the HSTU for
+sequence modeling. We adopt Grouped-Query Attention (GQA) to
+further reduce computational overhead. Formally, a full attention
+layer at the𝑙-th layer of our hybrid attention architecture is defined
+as follows:
+U(𝑙),{Q(𝑙,ℎ)}𝐻
+ℎ=1,{K(𝑙,𝑔),V(𝑙,𝑔)}𝐺
+𝑔=1=Split(𝜙 1(𝑓(𝑙)
+1(eX(𝑙))))(7)
+A(𝑙,ℎ)=𝜙 2(Q(𝑙,ℎ)K(𝑙,𝑔)𝑇⊙M)V(𝑙,𝑔),𝑔=⌈ℎ/𝑟⌉,∀ℎ(8)
+A(𝑙)=A(𝑙,1)∥···∥A(𝑙,𝐻)(9)
+X(𝑙+1)=𝑓(𝑙)
+2(GLN(A(𝑙))⊙U(𝑙))+X(𝑙)(10)
+Key
+QueryH Tokens R Tokens T Tokens
+H Tokens
+R Tokens
+Scenario-1
+T Tokens
+Scenario-2
+T Tokens
+Scenario-3
+T TokensMTFigure 2: An Example of Dynamic Mask
+where𝐻is the number of query heads, 𝐺is the number of key-
+value heads, 𝑟=𝐻/𝐺 is the number of query heads per key-value
+group;𝑓(𝑙)
+1and𝑓(𝑙)
+2denote linear layers; 𝜙1and𝜙2are nonlinearity;
+MTFM: A Scalable and Alignment-free Foundation Model for Industrial Recommendation in Meituan Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+HSeqs RSeqsShared User Features (Public) Scenario-specific Data (Heterogeneous)
+Scenario-1 DLRM
+User FeatsCross/Context
+FeatsScenario-2 DLRM
+User FeatsCross/Context
+Feats
+User-level
+AggregationUser-level
+Aggregation
+Scenario-1 User &
+Context & Item FeaturesScenario-2 User &
+Context & Item FeaturesRSeq2 Item ID &
+Side InfosRSeq1 Item ID &
+Side InfosHSeq2 Item ID &
+Side InfosHSeq1 Item ID &
+Side Infos
+Figure 3: Data Pipeline of MTFM
+andM∈R𝑁×𝑁is our dynamic mask matrix to aviod information
+leakage. Because it was sorted in advance according to timestamps,
+we can construct a dynamic mask according to the following rules:
+(1) The H-tokens are visible to all tokens;
+(2)The R-tokens are visible only to tokens with later timestamps
+to avoid information leakage;
+(3) The T-tokens are visible only to themselves.
+Figure 2 illustrates an example of our dynamic mask.
+In the Target Attention Layers, we update only the embeddings
+of T-tokens, while the embeddings of other tokens from the previous
+layer are passed to the next layer via a shortcut connection. First,
+we extract the sub-matrix corresponding to the T-tokens from the
+normalized token embedding matrix and the dynamic mask matrix:
+eX(𝑙)
+𝑇=eX(𝑙)[𝐿𝐻+𝐿𝑅:](11)
+M𝑇=M[𝐿𝐻+𝐿𝑅:](12)
+Then, we apply HSTU with GQA to update only the embeddings of
+T-tokens. Formally, a target attention layer at the𝑙-th layer of our
+hybrid attention architecture is defined as follows:
+U(𝑙)
+𝑇,{Q(𝑙,ℎ)
+𝑇}𝐻
+ℎ=1=Split(𝜙 1(𝑓(𝑙)
+𝑢𝑞((eX(𝑙)
+𝑇)))(13)
+{K(𝑙,𝑔),V(𝑙,𝑔)}𝐺
+𝑔=1=Split(𝜙 1(𝑓(𝑙)
+𝑘𝑣(eX(𝑙))))(14)
+A(𝑙,ℎ)
+𝑇=𝜙 2(Q(𝑙,ℎ)
+𝑇K(𝑙,𝑔)𝑇⊙M𝑇)V(𝑙,𝑔),𝑔=⌈ℎ/𝑟⌉,∀ℎ(15)
+A(𝑙)
+𝑇=A(𝑙,1)
+𝑇∥···∥A(𝑙,𝐻)
+𝑇(16)
+X(𝑙+1)
+𝑇=𝑓(𝑙)
+2(GLN(A(𝑙)
+𝑇)⊙U(𝑙)
+𝑇)+X(𝑙)
+𝑇(17)
+Finally, we concatenate the new embeddings of the T-tokens with
+the embeddings from the previous layer of other tokens to generate
+the output of the target attention layer.
+X(𝑙+1)=(X(𝑙)[:𝐿𝐻+𝐿𝑅];X(𝑙+1)
+𝑇)(18)
+The embeddings of the T-tokens from the final layer are input
+into an MMoE[ 14] module to compute prediction scores for various
+objectives across multiple scenarios.
+By employing this hybrid architecture, we reduce the compu-
+tational complexity from 𝑂(𝑁2)to𝑂(𝐾𝑁𝐿𝑇+𝑁2
+𝐾+1), where𝐿𝑇≪𝑁 .
+Our experiments demonstrate that HTA achieves a 2x throughput
+speedup in training without compromising model accuracy.
+3.3 Training and Deployment Optimization
+3.3.1 Data Pipeline of MTFM.In this section, we delineate the data
+pipeline design of MTFM. Following the precedent set by MTGR,
+we utilize user-level sample compression to diminish the cardi-
+nality of the training set. We further extend this technique into amulti-scenario user-level compression framework, which is shown
+in Figure 3. Specifically, we decouple the feature space into two
+distinct components: scenario-agnostic (shared) features, such as
+𝐻,𝑅, and scenario-specific features, such as 𝑈,𝐶,𝐼 . We first perform
+user-level aggregation on the scenario-specific features within their
+respective local scenarios. These aggregated components are then
+concatenated column-wise to construct a unified feature represen-
+tation, which is finally merged with the scenario-agnostic data at
+the user level. This pipeline effectively circumvents computational
+redundancy and storage overhead, significantly improving systemic
+robustness and resource utilization efficiency.
+3.3.2 Training Optimization.We conduct comprehensive optimiza-
+tions to the offline training framework:
+CPU-GPU Pipeline Optimization.In the domain of Large Lan-
+guage Models (LLMs), text undergoes tokenization with all features
+residing in GPU memory, enabling efficient end-to-end training. In
+contrast, recommendation systems face substantial feature engi-
+neering overhead, with numerous features stored in CPU memory.
+This architectural discrepancy creates blocking issues between
+GPU-resident models and CPU-resident features. The feature pro-
+cessing and model fusion pipelines involve extensive Host-Device
+data synchronization and serial dependencies, introducing multiple
+synchronization points where the Host must wait for Device-side
+operations to complete before proceeding. These CPU-GPU pipeline
+stalls severely degrade overall training performance.
+To address this challenge, we systematically profiled the training
+framework using CUDA Profiler to identify CPU/GPU blocking bot-
+tlenecks. Our optimization strategy encompasses two key aspects:
+(1) eliminating synchronization points to enable CPU-GPU execu-
+tion overlap, and (2) optimizing Device-side memory operations
+to reduce Device-to-Device (D2D) copy overhead. To implement
+the latter, we optimized frequent tensor indexing and assignment
+operations by consolidating multiple D2D copy operations into
+single atomic operations. Experimental results demonstrate that
+these systemic refinements improve training throughput by 20%.
+Custom Kernel Development.First, we present an enhanced
+FlashAttention-2 [ 4] kernel designed to overcome the limitations
+of dynamic masking. While existing implementations are primarily
+optimized for standard causal masks, they often suffer from signifi-
+cant memory inefficiencies due to discontinuous access patterns
+when handling dynamic masks. To resolve this, we introduce con-
+tiguous and aligned mask layouts that facilitate high-throughput
+asynchronous copying. We also employ a fine-grained shared mem-
+ory management strategy: we utilize available capacity to cache
+mask tiles during the forward pass, and implement temporal mul-
+tiplexing of masks and intermediate tensors during the backward
+pass. This orchestration effectively overlaps mask-loading latency
+with the computation pipeline.
+Furthermore, we implement fused operators for Group Layer
+Normalization (GLN) and dynamic mask construction using the
+Triton [ 23]. Native PyTorch implementations employ a Gather-
+Compute-Scatter pattern for GLN and fragmented operations for
+dynamic mask generation, resulting in excessive kernel launch over-
+head and inefficient memory access patterns. Leveraging Triton, we
+eliminate redundant intermediate memory transactions through
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY MTFM Team
+operator fusion, enhance bandwidth utilization via vectorized mem-
+ory access, and design group-wise parallel computation schemes to
+fully exploit GPU parallelism.
+Through these kernel-level optimizations, we achieved an addi-
+tional 57% throughput improvement.
+3.3.3 Inference Optimization.To enhance the inference efficiency
+of the MTFM model in large-scale industrial scenarios, we propose
+a comprehensive optimization framework spanning the sparsity,
+kernel, and system levels:
+Sparse Matrix Multiplication.Leveraging the Sparse Ten-
+sor Cores within the NVIDIA Ampere architecture, we implement
+2:4 structured pruning on the linear projection layers (UVQK and
+Output) of the HSTU module. This technique achieves a 50% re-
+duction in memory footprint and exploits double the theoretical
+peak throughput for matrix multiplication, significantly reducing la-
+tency without sacrificing predictive performance. This optimization
+yields approximately 10% throughput improvement and reduces
+inference latency by approximately 0.2ms.
+Attention Computation Optimization.To address the irregu-
+lar sparsity inherent in dynamic masks, we propose a fine-grained
+computation skipping strategy. This approach dynamically prunes
+redundant operations stemming from sequence padding and lever-
+ages domain-specific constraints to bypass invalid computation
+(e.g., zero-weight attention from user to target features). This opti-
+mization yields approximately 5% throughput improvement.
+Scenario-aware Deployment and Other Optimizations.Since
+MTFM is trained across multiple scenarios but deployed on indepen-
+dent sub-scenarios, we decompose the global computational graph
+into scenario-specific subgraphs. This modularization eliminates re-
+dundant operations associated with unnecessary scenario-specific
+features, thereby optimizing resource utilization. Furthermore, we
+leverage BF16 half-precision inference and the M-Falcon [ 30] algo-
+rithm to accelerate inference and maximize system throughput.
+4 Experiments
+In this section, we conduct extensive experiments on our real- world
+production datasets to validate the effectiveness of our proposed
+framework MTFM and answer the following research questions:
+RQ1: How does the MTFM model perform across multiple hetero-
+geneous multi-scenario tasks compared to other baseline models?
+RQ2: How does the hybrid attention architecture in MTFM affect
+model training and inference performance?
+RQ3: How does the MTFM model perform in terms of scalability,
+including model computational complexity scalability and data
+scalability?
+RQ4:Can MTFM provide interpretable insights into cross-scenario
+token interactions?
+RQ5: What is the online recommendation performance of MTFM
+for various heterogeneous scenarios in production environments?
+4.1 Experiments Setup
+4.1.1 Datasets.To accommodate the heterogeneous multi-scenario
+business data proposed in this work, we construct our offline exper-
+imental dataset from a real-world industrial food delivery recom-
+mendation system (Meituan) using user behavior logs. The dataset
+comprises three primary recommendation scenarios:HomepageTable 1: Dataset statistics across our three scenarios.
+Scenario #Users #Item #Exposure #Click #Purchase
+HP 240M 4.23M 18.53B 1.08B 176.77M
+PHF 151M 8.07M 15.29B 359.14M 104.73M
+SQS 44M 0.98M 2.24B 85.34M 9.92M
+(HP)Restaurant Recommendation,Shenqiangshou(SQS)Coupon-
+Package Recommendation , andPinhaofan(PHF)Food Recom-
+mendation, with their respective data statistics summarized in Table
+1. Specifically, HP serves as the highest-exposure scenario where
+restaurant cards are recommended to users for order placement,
+while the SQS and PHF scenarios are food-centric with distinct
+business objectives (detailed in 4.1.2). Over the past years, these
+scenarios have been continuously optimized both in business oper-
+ations and recommendation architecture, making them the focal
+points for model innovation and industrial impact within Meituan’s
+ecosystem.
+4.1.2 Metrics & Baselines.We evaluate model performance pri-
+marily using AUC (Area Under the Curve) and GAUC (Grouped
+AUC) to assess prediction quality across diverse scenarios. For HP
+and PHF, we focus on CTR and CTCVR to measure exposure and
+conversion effectiveness. In the SQS, we extend our evaluation
+to include package redemption efficiency via two specialized met-
+rics: IMD (Immediate Redemption within 30 minutes) and WRITE
+(Redemption within 24 hours).
+To ensure rigorous comparison, we categorize baseline models
+according to their architecture types: 1) General recommenders
+includingDCNv2[24],MMoE[15], andRankMixer[37], which
+are widely adopted for feature interaction and multi-task learning.
+2) Generative Ranking Models, such asMTGR[ 9] andOneTrans
+[34], representing the latest advances in generative sequence model-
+ing. 3) Multi-Scenario Recommendation Models, such asSTAR[ 19]
+andPEPNet[ 3], which integrate multiple scenarios into a unified
+framework, allowing adaptive scenario modeling. Notably, models
+in (1) and (2) are trained on a single-scenario dataset, whereas (3)
+and (4) leverage a multi-scenario dataset for training.
+4.1.3 Hyper-parameter Settings.For offline experiments, we use
+the Adam optimizer (learning rate3 ×10−4) with hyperparameters
+set to𝑑𝑚𝑜𝑑𝑒𝑙 =768,𝐵=4,𝐾=3,𝐻=3, and𝐺=1.
+4.2 Overall Performance Comparison (RQ1)
+Table 2 presents the main experimental results for three representa-
+tive scenarios: HP, PHF, and SQS. Several key insights can be drawn.
+First, RankMixer delivers competitive results among general rec-
+ommenders by effectively supporting model scaling; it marginally
+exceeds other baselines on HP while achieving substantial gains
+on SQS, outperforming MMoE by 0.38pp in CTCVR GAUC and
+0.49pp in WRITE GAUC. However, in the PHF setting, its perfor-
+mance remains superior to DCNv2 but trails behind MMoE. Second,
+multi-scenario methods such as STAR and PEPNet generally outper-
+form general baselines but fall short of generative ranking models
+like MTGR and OneTrans. Notably, these methods exhibit a pro-
+nounced "see-saw effect"; for instance, PEPNet surpasses RankMixer
+in HP and PHF but underperforms in the SQS scenario. In contrast,
+MTFM: A Scalable and Alignment-free Foundation Model for Industrial Recommendation in Meituan Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+Table 2: Performance comparison of different methods in terms of their respective task metrics on three scenarios. The best
+and second-best results are highlighted in boldface and underlined, respectively.
+Homepage Recommendation (HP) Food Recommendation (PHF)Method
+CTR CTCVR CTR CTCVR
+AUC GAUC AUC GAUC AUC GAUC AUC GAUC
+DCNv2 0.7664 0.6853 0.8780 0.6451 0.7683 0.7236 0.8586 0.7555
+MMoE 0.7664 0.6857 0.8782 0.6454 0.7718 0.7282 0.8640 0.7597 General Recommenders
+Rankmixer 0.7665 0.6860 0.8789 0.6464 0.7711 0.7270 0.8628 0.7590
+OneTrans 0.7672 0.6944 0.8774 0.6497 0.7832 0.7373 0.8827 0.7735Generative Ranking MethodMTGR 0.7679 0.6951 0.8776 0.6491 0.7883 0.7398 0.8879 0.7771
+STAR 0.7669 0.6882 0.8780 0.6482 0.7821 0.7298 0.8688 0.7660Multi-Scenario MethodPEPNet 0.7672 0.6895 0.8790 0.6489 0.7866 0.7328 0.8721 0.7693
+Our Proposed Method MTFM 0.7689 0.6954 0.8806 0.6507 0.7940 0.7474 0.8892 0.7824
+Coupon-Package Recommendation (SQS)Method
+CTR CTCVR IMD WRITE
+AUC GAUC AUC GAUC AUC GAUC AUC GAUC
+DCNv2 0.8290 0.7789 0.9057 0.8227 0.9074 0.8254 0.9072 0.8222
+MMoE 0.8449 0.7842 0.9073 0.8243 0.9082 0.8252 0.9056 0.8230 General Recommenders
+Rankmixer 0.8472 0.7881 0.9094 0.8281 0.9105 0.82680.9080 0.8279
+OneTrans 0.8454 0.7994 0.9091 0.8271 0.9089 0.8279 0.9055 0.8248Generative Ranking MethodMTGR 0.8454 0.7997 0.9097 0.8282 0.9095 0.8291 0.9059 0.8258
+STAR 0.8470 0.7863 0.9079 0.8245 0.9081 0.8257 0.9055 0.8233Multi-Scenario MethodPEPNet 0.8511 0.7892 0.9081 0.8251 0.9089 0.8268 0.9066 0.8239
+Our Proposed Method MTFM 0.8624 0.8027 0.9119 0.8301 0.9117 0.8319 0.90790.8288
+Table 3: Performance comparison of hybrid architecture
+configurations with varying target-to-full attention ratios.
+Throughput is measured as samples per second on a single
+NVIDIA A100 GPU.
+Configuration Batch AUC GAUC Throughput Memory
+(Target:Full) Size (samples/s) (GB)
+Full Attention Only
+(0:16)*1 1×0.7514 0.6818 390 66.97
+Target Attention Only
+(16:0)*1 1×0.7497 0.6806 575 32.64
+Hybrid Configurations
+(1:1)*8 1×0.7508 0.6820 497 38.00
+(3:1)*4 1×0.7506 0.6821 547 34.08
+(5:1)*3 1×0.7504 0.6811 535 37.52
+(3:1)*4 (w/o GQA) 2×0.7506 0.6822 660 70.16
+(3:1)*4 (MTFM)2×0.7506 0.682278067.49
+generative models consistently demonstrate superior robustness,
+with MTGR slightly edging out OneTrans across most metrics. Ulti-
+mately, our proposed MTFM model achieves state-of-the-art results
+across nearly all scenarios and tasks. The consistent dominance of
+MTFM underscores its capability to not only mitigate the see-saw
+effect but, more importantly, to capitalize on the scaling law by effi-
+ciently leveraging extensive multi-scenario data to further enhance
+model’s performance.
+4.3 Efficiency Analysis of HTA (RQ2)
+In this section, we conducted extensive experiments to explore dif-
+ferent configurations of the hybrid target attention. We performed
+experiments using another 7-day sample for training. We denotethe various network architecture configurations as (𝐾:𝑃)×𝐵 ,
+where𝐵represents the total number of blocks. Within each block,
+𝐾and𝑃signify the number of Target Attention layers and Full
+Attention layers, respectively. We further evaluate a special case,
+Target Attention Only, where the model degenerates into the lazy
+decoder as seen in OneRecV2[36].
+We evaluate the impact of varying the ratio between target and
+full attention layers (Table 3). The 1:1 and 3:1 configurations main-
+tain or even slightly improve performance relative to full attention
+while delivering significant gains in both memory efficiency and
+training throughput. When the sparsity ratio is further increased to
+5:1, performance begins to decline by 0.07pp, with the degradation
+widening to 0.12pp under a pure target attention setup. Addition-
+ally, the integration of GQA provides further gains in throughput
+alongside additional reductions in memory consumption. Finally,
+our HTA achieves a 2x speedup in training throughput compared
+to the full attention mechanism.
+4.4 Scalability (RQ3)
+In this section, we systematically evaluate the scalability of MTFM
+for multi-scenario recommendation (MSR) by examining its perfor-
+mance across varying model scales and training data volumes.
+4.4.1 Scalability with Model Size in MSR.We evaluated its perfor-
+mance across various model scales (ranging from 10x to 70x), using
+MMoE as the competitive baseline. We employ CTCVR GAUC as
+the primary metric across three distinct scenarios: SQS, HP, and
+PHF. As illustrated in Figure 4(a), MTFM exhibits robust scaling
+laws with consistent slopes across all scenarios, underscoring its
+superior scalability regarding model capacity in MSR tasks.
+Conference acronym ’XX, June 03–05, 2018, Woodstock, NY MTFM Team
+10 20 30 40 50 60 70
+Relative Inference GFLOPs (MMoE = 1×)0.00.20.40.60.81.0CTCVR GAUC GainR2=0.9952
+R2=0.9833
+R2=0.9368CTCVR GAUC Gain over Relative Inference GFLOPs
+SQS
+HP
+PHF
+(a) CTCVR GAUC scaling with inference GFLOPs across 3 scenarios.
+lMTFM-LargeB=4,dmodel=768lMTFM-Medum  B=2,dmodel=768lMTFM-Small     B=1,dmodel=512SQSCTCVRGAUC
+TrainingSteps
+(b) GAUC scaling with training data for different model sizes.
+Figure 4: Scalability analysis of MTFM.
+4.4.2 Scalability with Training Data Volumes in MRS.As depicted
+in Figure 4(b), we investigate the impact of the data scale on MTFM
+by selecting models of three different sizes and observing their
+performance fluctuations in SQS’s CTCVR GAUC throughout the
+continual training phase. Empirical results reveal that across all
+model scales, performance improves consistently as the volume of
+training tokens increases. In experiments with larger data scales,
+we further observe that the performance gap between models of
+different sizes widens gradually as the number of training tokens
+increases. This robust scaling trend underscores MTFM’s data scala-
+bility and demonstrates its ability to consistently convert increased
+training volumes into performance improvements.
+4.5 Interpretability Analysis (RQ4)
+To understand how MTFM models scenario-specific characteristics
+and captures differentiated cross-scenario knowledge, we visual-
+ize the attention heatmaps for representative samples in Figure
+5. The horizontal axis denotes T-Tokens across scenarios, while
+the vertical axis represents H-Tokens. Our observations include: 1)
+T-Tokens in all scenarios effectively aggregate information from H-
+Tokens across the entire multi-scenario space. 2) Distinct learning
+patterns emerge across scenarios; for instance, T-Tokens in HP and
+SQS exhibit higher attention weights toward their own H-Tokens
+compared to those of PHF, whereas PHF T-Tokens are more heavily
+indexed on their corresponding H-Tokens. Overall, the heatmaps
+reveal distinct block-wise attention patterns, demonstrating that
+MTFM is not only capable of learning from multi-scenario data but
+also possesses robust scenario-awareness.
+HPH-Tokens
+PHFH-Tokens
+HPR-TokensSQSR-TokensPHFR-TokensSQSH-TokensFigure 5: Attention heatmap visualization for MTFM. The
+horizontal/vertical axis represents T/H-tokens respectively.
+4.6 Online Experiments (RQ5)
+To validate MTFM’s real-world impact, we conducted A/B tests
+across two major online scenarios. The experimental traffic in-
+volved tens of millions of daily exposures, ensuring robust results.
+The baseline model was the current SOTA model, which has been
+continuously optimized and deployed for several years.
+Table 4: Online Performance of MTFM.
+Scenario CTR UV_CTCVR ORDERS LATENCY
+SQS +1.89% +2.46% +2.98% -5ms
+PHF +1.53% +1.03% +1.45% -6ms
+As shown in Table 4, MTFM delivers consistent performance
+improvements across all key business metrics. The observed on-
+line uplift in orders with MTFM is equivalent to the cumulative
+gains typically achieved over 2–3 rounds of model iteration in this
+business domain. In addition, we evaluate the latency of MTFM,
+where the results indicate that our system optimizations lead to
+better performance. These results clearly demonstrate that MTFM
+could deliver direct business value in real-world recommendation
+systems.
+5 Conclusion
+In this paper, we propose MTFM, a recommendation foundation
+model that leverages heterogeneous tokenization to achieve a truly
+alignment-free architecture across diverse domains. Through the
+co-design of algorithms, training, and deployment systems, MTFM
+simultaneously embodies the three quintessential properties: Scal-
+ability, Extensibility, and Efficiency. Extensive offline evaluations
+demonstrate significant performance gains, establishing a new scal-
+able paradigm that successfully transcends the limitations of single-
+scenario silos. Finally, online A/B tests confirm MTFM’s real-world
+effectiveness, delivering substantial improvements in CTR and con-
+version volumes in Meituan.
+MTFM: A Scalable and Alignment-free Foundation Model for Industrial Recommendation in Meituan Conference acronym ’XX, June 03–05, 2018, Woodstock, NY
+References
+[1]Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury Zemlyanskiy, Federico
+Lebron, and Sumit Sanghai. 2023. GQA: Training Generalized Multi-Query
+Transformer Models from Multi-Head Checkpoints. InProceedings of the 2023
+Conference on Empirical Methods in Natural Language Processing. 4895–4901.
+[2]Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui Chen, Zesen Cheng,
+Lianghao Deng, Wei Ding, Chang Gao, et al .2025. Qwen3-VL Technical Report.
+arXiv:2511.21631 [cs.CV] https://arxiv.org/abs/2511.21631
+[3]Jianxin Chang, Chenbin Zhang, Yiqun Hui, Dewei Leng, Yanan Niu, Yang Song,
+and Kun Gai. 2023. Pepnet: Parameter and embedding personalized network for
+infusing with personalized prior information. InProceedings of the 29th ACM
+SIGKDD Conference on Knowledge Discovery and Data Mining. 3795–3804.
+[4]Tri Dao. 2023. Flashattention-2: Faster attention with better parallelism and work
+partitioning.arXiv preprint arXiv:2307.08691(2023).
+[5]Jiaxin Deng, Shiyao Wang, Kuo Cai, Lejian Ren, Qigen Hu, Weifeng Ding, Qiang
+Luo, and Guorui Zhou. 2025. Onerec: Unifying retrieve and rank with generative
+recommender and iterative preference alignment.arXiv preprint arXiv:2502.18965
+(2025).
+[6]William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch transformers:
+Scaling to trillion parameter models with simple and efficient sparsity.Journal
+of Machine Learning Research23, 120 (2022), 1–39.
+[7]Chaoyou Fu, Haojia Lin, Xiong Wang, Yi-Fan Zhang, Yunhang Shen, Xiaoyu Liu,
+Haoyu Cao, Zuwei Long, Heting Gao, Ke Li, et al .2025. Vita-1.5: Towards gpt-4o
+level real-time vision and speech interaction.arXiv preprint arXiv:2501.01957
+(2025).
+[8]Ruidong Han, Qianzhong Li, He Jiang, Rui Li, Yurou Zhao, Xiang Li, and Wei
+Lin. 2024. Enhancing CTR Prediction through Sequential Recommendation Pre-
+training: Introducing the SRP4CTR Framework. InProceedings of the 33rd ACM
+International Conference on Information and Knowledge Management. 3777–3781.
+[9]Ruidong Han, Bin Yin, Shangyu Chen, He Jiang, Fei Jiang, Xiang Li, Chi Ma,
+Mincong Huang, Xiaoguang Li, Chunzhen Jing, et al .2025. Mtgr: Industrial-
+scale generative recommendation framework in meituan. InProceedings of the
+34th ACM International Conference on Information and Knowledge Management.
+5731–5738.
+[10] Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, Elena Buchatskaya,
+Trevor Cai, Eliza Rutherford, Diego de Las Casas, Lisa Anne Hendricks, Johannes
+Welbl, Aidan Clark, et al .2022. Training compute-optimal large language models.
+arXiv preprint arXiv:2203.15556(2022).
+[11] Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B Brown, Benjamin Chess,
+Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. 2020.
+Scaling laws for neural language models.arXiv preprint arXiv:2001.08361(2020).
+[12] Dai Li, Kevin Course, Wei Li, Hongwei Li, Jie Hua, Yiqi Chen, Zhao Zhu, Rui Jian,
+Xuan Cao, Bi Xue, et al .2025. Realizing Scaling Laws in Recommender Systems: A
+Foundation-Expert Paradigm for Hyperscale Model Deployment.arXiv preprint
+arXiv:2508.02929(2025).
+[13] Alexander H. Liu, Kartik Khandelwal, Sandeep Subramanian, Victor Jouault,
+Abhinav Rastogi, Adrien Sadé, Alan Jeffares, Albert Jiang, Alexandre Cahill, et al .
+2026. Ministral 3. arXiv:2601.08584 [cs.CL] https://arxiv.org/abs/2601.08584
+[14] Jiaqi Ma, Zhe Zhao, Xinyang Yi, Jilin Chen, Lichan Hong, and Ed H Chi. 2018.
+Modeling task relationships in multi-task learning with multi-gate mixture-of-
+experts. InProceedings of the 24th ACM SIGKDD international conference on
+knowledge discovery & data mining. 1930–1939.
+[15] Jiaqi Ma, Zhe Zhao, Xinyang Yi, Jilin Chen, Lichan Hong, and Ed H. Chi. 2018.
+Modeling Task Relationships in Multi-task Learning with Multi-gate Mixture-
+of-Experts. InProceedings of the 24th ACM SIGKDD International Conference on
+Knowledge Discovery & Data Mining. 1930–1939.
+[16] Qwen Team. 2025. Qwen3-Next: Towards Ultimate Training and Inference
+Efficiency. https://qwen3-next.com/. Accessed: 2026-01-20.
+[17] Ads Recommendation. 2025. External Large Foundation Model: How to Efficiently
+Serve Trillions of Parameters for Online Ads Recommendation.arXiv preprint
+arXiv:2502.17494(2025).
+[18] Xiang-Rong Sheng, Liqin Zhao, Guorui Zhou, Xinyao Ding, Binding Dai, Qiang
+Luo, Siran Yang, Jingshan Lv, Chi Zhang, Hongbo Deng, et al .2021. One model to
+serve all: Star topology adaptive recommender for multi-domain ctr prediction. In
+Proceedings of the 30th ACM International Conference on Information & Knowledge
+Management. 4104–4113.
+[19] Xiang-Rong Sheng, Liqin Zhao, Guorui Zhou, Xinyao Ding, Binding Dai, Qiang
+Luo, Siran Yang, Jingshan Lv, Chi Zhang, Hongbo Deng, et al .2021. One model to
+serve all: Star topology adaptive recommender for multi-domain ctr prediction. InProceedings of the 30th ACM International Conference on Information & Knowledge
+Management. 4104–4113.
+[20] Xiufeng Shu, Ruidong Han, Xiang Li, and Wei Lin. 2024. Adaptive Utilization of
+Cross-scenario Information for Multi-scenario Recommendation.arXiv preprint
+arXiv:2407.19727(2024).
+[21] Core Team, Bangjun Xiao, Bingquan Xia, Bo Yang, Bofei Gao, Bowen Shen, Chen
+Zhang, et al .2026. MiMo-V2-Flash Technical Report. arXiv:2601.02780 [cs.CL]
+https://arxiv.org/abs/2601.02780
+[22] Kimi Team, Angang Du, Bohong Yin, Bowei Xing, Bowen Qu, Bowen Wang,
+Cheng Chen, Chenlin Zhang, Chenzhuang Du, Chu Wei, et al .2025. Kimi-vl
+technical report.arXiv preprint arXiv:2504.07491(2025).
+[23] Philippe Tillet, Hsiang-Tsung Kung, and David Cox. 2019. Triton: an intermediate
+language and compiler for tiled neural network computations. InProceedings of
+the 3rd ACM SIGPLAN International Workshop on Machine Learning and Program-
+ming Languages. 10–19.
+[24] Ruoxi Wang, Rakesh Shivanna, Derek Cheng, Sagar Jain, Dong Lin, Lichan Hong,
+and Ed Chi. 2021. DCN V2: Improved Deep & Cross Network and Practical
+Lessons for Web-scale Learning to Rank Systems. InProceedings of the Web
+Conference 2021 (WWW ’21). 1785–1797.
+[25] Yuxiang Wang, Xiao Yan, Chi Ma, Mincong Huang, Xiaoguang Li, Lei Yu, Chuan
+Liu, Ruidong Han, He Jiang, Bin Yin, et al .2025. MTGRBoost: Boosting Large-scale
+Generative Recommendation Models in Meituan.arXiv preprint arXiv:2505.12663
+(2025).
+[26] Liu Xiaoyu, Yiqing Wu, Ruidong Han, Fuzhen Zhuang, Xiang Li, and Wei Lin. 2025.
+A Soft-partitioned Semi-supervised Collaborative Transfer Learning Approach
+for Multi-Domain Recommendation. InProceedings of the 34th ACM International
+Conference on Information and Knowledge Management. 5366–5370.
+[27] Biao Yang, Bin Wen, Boyang Ding, Changyi Liu, Chenglong Chu, Chengru Song,
+Chongling Rao, Chuan Yi, Da Li, Dunju Zang, et al .2025. Kwai keye-vl 1.5
+technical report.arXiv preprint arXiv:2509.01563(2025).
+[28] Zhiming Yang, Haining Gao, Dehong Gao, Luwei Yang, Libin Yang, Xiaoyan
+Cai, Wei Ning, and Guannan Zhang. 2024. Mlora: Multi-domain low-rank adap-
+tive network for ctr prediction. InProceedings of the 18th ACM Conference on
+Recommender Systems. 287–297.
+[29] Jingyang Yuan, Huazuo Gao, Damai Dai, Junyu Luo, Liang Zhao, Zhengyan
+Zhang, Zhenda Xie, Yuxing Wei, Lean Wang, Zhiping Xiao, et al .2025. Native
+sparse attention: Hardware-aligned and natively trainable sparse attention. In
+Proceedings of the 63rd Annual Meeting of the Association for Computational
+Linguistics (Volume 1: Long Papers). 23078–23097.
+[30] Jiaqi Zhai, Lucy Liao, Xing Liu, Yueming Wang, Rui Li, Xuan Cao, Leon Gao, Zhao-
+jie Gong, Fangda Gu, Michael He, et al .2024. Actions speak louder than words:
+Trillion-parameter sequential transducers for generative recommendations.arXiv
+preprint arXiv:2402.17152(2024).
+[31] Buyun Zhang, Liang Luo, Yuxin Chen, Jade Nie, Xi Liu, Daifeng Guo, Yanli Zhao,
+Shen Li, Yuchen Hao, Yantao Yao, et al .2024. Wukong: Towards a scaling law for
+large-scale recommendation.arXiv preprint arXiv:2403.02545(2024).
+[32] Shangyu Zhang, Shijie Quan, Zhongren Wang, Junwei Pan, Tianqu Zhuang,
+Bo Fu, Yilong Sun, Jieying Lin, Jushuo Chen, Xiaotian Li, et al .2025. Large
+Foundation Model for Ads Recommendation.arXiv preprint arXiv:2508.14948
+(2025).
+[33] Zijian Zhang, Shuchang Liu, Jiaao Yu, Qingpeng Cai, Xiangyu Zhao, Chunxu
+Zhang, Ziru Liu, Qidong Liu, Hongwei Zhao, Lantao Hu, et al .2024. M3oe:
+Multi-domain multi-task mixture-of experts recommendation framework. In
+Proceedings of the 47th International ACM SIGIR Conference on Research and
+Development in Information Retrieval. 893–902.
+[34] Zhaoqi Zhang, Haolei Pei, Jun Guo, Tianyu Wang, Yufei Feng, Hui Sun, Shaowei
+Liu, and Aixin Sun. 2025. OneTrans: Unified Feature Interaction and Sequence
+Modeling with One Transformer in Industrial Recommender.arXiv preprint
+arXiv:2510.26104(2025).
+[35] Guorui Zhou, Jiaxin Deng, Jinghao Zhang, Kuo Cai, Lejian Ren, et al .2025. OneRec
+Technical Report. arXiv:2506.13695 [cs.IR] https://arxiv.org/abs/2506.13695
+[36] Guorui Zhou, Hengrui Hu, Hongtao Cheng, Huanjie Wang, Jiaxin Deng, Jinghao
+Zhang, Kuo Cai, et al .2025. OneRec-V2 Technical Report. arXiv:2508.20900 [cs.IR]
+https://arxiv.org/abs/2508.20900
+[37] Jie Zhu, Zhifang Fan, Xiaoxie Zhu, Yuchen Jiang, Hangyu Wang, Xintian Han,
+Haoran Ding, Xinmin Wang, Wenlin Zhao, Zhen Gong, et al .2025. Rankmixer:
+Scaling up ranking models in industrial recommenders. InProceedings of the
+34th ACM International Conference on Information and Knowledge Management.
+6309–6316.
+
